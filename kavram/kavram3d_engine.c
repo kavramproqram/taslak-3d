@@ -32,7 +32,6 @@ typedef struct {
     int   motion_axis;
     float motion_time;
     int   duplicate;
-    int   group_id;
 } KVObject;
 
 typedef struct {
@@ -45,7 +44,6 @@ typedef struct {
     KVObject objects[KV_MAX_OBJECTS];
     int      object_count;
     int      next_id;
-    int      next_group_id;
     KVCamera camera;
     int      viewport_w, viewport_h;
     int      ground_visible;
@@ -258,56 +256,6 @@ static void kv_pick_ray(KVEngine *e, float sx, float sy, float ro[3], float rd[3
     rd[0]/=l; rd[1]/=l; rd[2]/=l;
 }
 
-
-static int kv_project_point(KVEngine *e, const float p[3], float *sx, float *sy) {
-    if (!e || !p || !sx || !sy) return 0;
-    float vp[16]; kv_view_projection(e, vp);
-    float clip[4];
-    clip[0] = vp[0]*p[0] + vp[4]*p[1] + vp[8]*p[2]  + vp[12];
-    clip[1] = vp[1]*p[0] + vp[5]*p[1] + vp[9]*p[2]  + vp[13];
-    clip[2] = vp[2]*p[0] + vp[6]*p[1] + vp[10]*p[2] + vp[14];
-    clip[3] = vp[3]*p[0] + vp[7]*p[1] + vp[11]*p[2] + vp[15];
-    if (fabsf(clip[3]) < 1e-8f) return 0;
-    float nx = clip[0] / clip[3];
-    float ny = clip[1] / clip[3];
-    *sx = (nx + 1.0f) * 0.5f * (float)e->viewport_w;
-    *sy = (1.0f - ny) * 0.5f * (float)e->viewport_h;
-    return 1;
-}
-
-static int kv_id_in_list(const int *ids, int count, int id) {
-    if (!ids || count <= 0) return 0;
-    for (int i=0; i<count; ++i) if (ids[i] == id) return 1;
-    return 0;
-}
-
-static float kv_object_bottom(KVEngine *e, const KVObject *o) {
-    return o->position[2] - kv_obj_radius(e, o);
-}
-
-static int kv_candidate_collides(KVEngine *e,
-                                 const int *source_ids, int source_count,
-                                 int mesh_id, const float pos[3],
-                                 const float rot[3], const float scale[3],
-                                 float extra_gap) {
-    (void)rot;
-    KVObject tmp;
-    memset(&tmp, 0, sizeof(tmp));
-    tmp.mesh_id = mesh_id;
-    tmp.position[0] = pos[0]; tmp.position[1] = pos[1]; tmp.position[2] = pos[2];
-    tmp.scale[0] = scale[0]; tmp.scale[1] = scale[1]; tmp.scale[2] = scale[2];
-    float r = kv_obj_radius(e, &tmp);
-    float rr;
-    for (int i=0; i<e->object_count; ++i) {
-        KVObject *o=&e->objects[i];
-        if (kv_id_in_list(source_ids, source_count, o->id)) continue;
-        rr = r + kv_obj_radius(e, o) + extra_gap;
-        float dx=pos[0]-o->position[0], dy=pos[1]-o->position[1], dz=pos[2]-o->position[2];
-        if (dx*dx + dy*dy + dz*dz < rr*rr) return 1;
-    }
-    return 0;
-}
-
 static void kv_seed_default_cube(KVEngine *e) {
     KVObject *o=&e->objects[0];
     memset(o,0,sizeof(*o));
@@ -325,7 +273,6 @@ void *kavram3d_create(void) {
     KVEngine *e=(KVEngine*)calloc(1,sizeof(KVEngine));
     if (!e) return NULL;
     e->next_id=1;
-    e->next_group_id=1;
     e->camera.yaw=-60.0f*(float)M_PI/180.0f;
     e->camera.pitch=25.0f*(float)M_PI/180.0f;
     e->camera.distance=12.0f;
@@ -335,7 +282,7 @@ void *kavram3d_create(void) {
     return e;
 }
 void kavram3d_destroy(void *h){free(h);}
-void kavram3d_reset(void *h){KVEngine*e=(KVEngine*)h;if(!e)return;e->object_count=0;e->next_id=1;e->next_group_id=1;kv_seed_default_cube(e);}
+void kavram3d_reset(void *h){KVEngine*e=(KVEngine*)h;if(!e)return;e->object_count=0;e->next_id=1;kv_seed_default_cube(e);}
 void kavram3d_set_viewport(void *h,int w,int hh){KVEngine*e=(KVEngine*)h;if(!e)return;e->viewport_w=w>0?w:1;e->viewport_h=hh>0?hh:1;}
 void kavram3d_get_view_projection(void *h,float *out){KVEngine*e=(KVEngine*)h;if(!e||!out)return;float vp[16];kv_view_projection(e,vp);memcpy(out,vp,sizeof(vp));}
 void kavram3d_get_camera_position(void *h,float *out){KVEngine*e=(KVEngine*)h;if(!e||!out)return;float p[3];kv_camera_position(&e->camera,p);out[0]=p[0];out[1]=p[1];out[2]=p[2];}
@@ -346,19 +293,6 @@ int kavram3d_selected_count(void *h){KVEngine*e=(KVEngine*)h;if(!e)return 0;int 
 int kavram3d_selected_id_at(void *h,int index){KVEngine*e=(KVEngine*)h;if(!e||index<0)return 0;int c=0;for(int i=0;i<e->object_count;++i)if(e->objects[i].selected){if(c==index)return e->objects[i].id;++c;}return 0;}
 void kavram3d_select(void *h,int id){KVEngine*e=(KVEngine*)h;if(!e)return;for(int i=0;i<e->object_count;++i)e->objects[i].selected=(e->objects[i].id==id)?1:0;}
 void kavram3d_toggle_select(void *h,int id){KVEngine*e=(KVEngine*)h;if(!e)return;KVObject*o=kv_find(e,id);if(o)o->selected=!o->selected;}
-
-
-void kavram3d_select_box(void *h, float x0, float y0, float x1, float y1, int additive) {
-    KVEngine*e=(KVEngine*)h; if(!e) return;
-    if (!additive) for (int i=0;i<e->object_count;++i) e->objects[i].selected=0;
-    float l=fminf(x0,x1), r=fmaxf(x0,x1), t=fminf(y0,y1), b=fmaxf(y0,y1);
-    for (int i=0;i<e->object_count;++i) {
-        KVObject *o=&e->objects[i];
-        float sx,sy;
-        if (!kv_project_point(e,o->position,&sx,&sy)) continue;
-        if (sx>=l && sx<=r && sy>=t && sy<=b) o->selected=1;
-    }
-}
 
 int kavram3d_pick(void *h,float sx,float sy){
     KVEngine*e=(KVEngine*)h;if(!e)return 0;
@@ -489,109 +423,51 @@ int kavram3d_create_object(void *h,int mesh_id,const char *name,float x,float y,
     o->scale[0]=o->scale[1]=o->scale[2]=1.0f;
     o->color[0]=0.55f;o->color[1]=0.58f;o->color[2]=0.62f;o->color[3]=1.0f;
     o->selected=1;
-    o->group_id=0;
     return o->id;
 }
 
 int kavram3d_add_object_at_surface(void*h,int mesh_id,float sx,float sy,const char*name,int target){
     KVEngine*e=(KVEngine*)h;if(!e)return 0;
-    float p[3]={0,0,0};
-    float sc[3]={1,1,1}, rt[3]={0,0,0};
-    /* Yeni cismin tabanı zemine veya hedef cismin üstüne gelsin. */
-    KVObject probe; memset(&probe,0,sizeof(probe)); probe.mesh_id=mesh_id;
-    probe.scale[0]=probe.scale[1]=probe.scale[2]=1.0f;
-    float new_r=kv_obj_radius(e,&probe);
-    if (target) {
+    if(target){
         KVObject*t=kv_find(e,target);
-        if (t) {
-            float r=kv_obj_radius(e,t);
-            p[0]=t->position[0]; p[1]=t->position[1]; p[2]=t->position[2]+r+new_r;
-        } else if (!kavram3d_screen_to_ground(h,sx,sy,p)) return 0;
-    } else if (!kavram3d_screen_to_ground(h,sx,sy,p)) {
-        return 0;
-    } else {
-        p[2]=new_r;
+        if(t){float r=kv_obj_radius(e,t);return kavram3d_create_object(h,mesh_id,name,t->position[0],t->position[1],t->position[2]+r);}
     }
-    if (kv_candidate_collides(e,NULL,0,mesh_id,p,rt,sc,0.001f)) return 0;
+    float p[3]={0,0,0};
+    kavram3d_screen_to_ground(h,sx,sy,p);
     return kavram3d_create_object(h,mesh_id,name,p[0],p[1],p[2]);
 }
 
-int kavram3d_duplicate_selection_at_surface(void*h,float sx,float sy){
-    KVEngine*e=(KVEngine*)h;if(!e)return 0;
-    int ids[KV_MAX_OBJECTS]; int n=0;
-    for(int i=0;i<e->object_count && n<KV_MAX_OBJECTS;++i)
-        if(e->objects[i].selected) ids[n++]=e->objects[i].id;
-    if(!n)return 0;
-    float anchor[3]={0,0,0}; KVObject *a=kv_find(e,ids[0]);
-    if(!a)return 0;
-    anchor[0]=a->position[0]; anchor[1]=a->position[1]; anchor[2]=a->position[2];
-    float target[3];
-    if(!kavram3d_screen_to_ground(h,sx,sy,target))return 0;
-    float min_bottom=1e30f;
-    for(int i=0;i<n;++i){
-        KVObject*o=kv_find(e,ids[i]); if(!o)continue;
-        float bottom=kv_object_bottom(e,o);
-        if(bottom<min_bottom)min_bottom=bottom;
-    }
-    if(min_bottom>1e20f)min_bottom=0.0f;
-    float delta[3]={target[0]-anchor[0], target[1]-anchor[1], -min_bottom};
-
-    /* Önce tüm adayları hesapla; hiçbir parça çakışacaksa grubun tamamı üretilmez. */
-    float pos[KV_MAX_OBJECTS][3];
-    for(int i=0;i<n;++i){
-        KVObject*o=kv_find(e,ids[i]); if(!o)return 0;
-        pos[i][0]=o->position[0]+delta[0];
-        pos[i][1]=o->position[1]+delta[1];
-        pos[i][2]=o->position[2]+delta[2];
-        if(kv_candidate_collides(e,ids,n,o->mesh_id,pos[i],o->rotation,o->scale,0.003f)) return 0;
-    }
-    /* Grup içi başlangıç geometrisi zaten geçerli kabul edilir; göreli konum korunur. */
-    int new_group=e->next_group_id++;
-    int created=0;
-    for(int i=0;i<n;++i){
-        KVObject*src=kv_find(e,ids[i]); if(!src) continue;
-        if(e->object_count>=KV_MAX_OBJECTS)break;
-        KVObject*no=&e->objects[e->object_count++];
-        *no=*src;
-        no->id=e->next_id++;
-        no->position[0]=pos[i][0]; no->position[1]=pos[i][1]; no->position[2]=pos[i][2];
-        no->motion_time=0.0f;
-        no->selected=0;
-        no->duplicate=1;
-        no->group_id=new_group;
-        if(!created)created=no->id;
-    }
-    return created;
-}
-
 int kavram3d_duplicate_selected_at_surface(void*h,float sx,float sy,int target){
+    KVEngine*e=(KVEngine*)h;if(!e)return 0;
+    int sid=kavram3d_selected_id(h);if(!sid)return 0;
+    KVObject*src=kv_find(e,sid);if(!src)return 0;
+    float p[3]={src->position[0]+1.0f,src->position[1]+1.0f,src->position[2]};
+    float gp[3];
+    if(kavram3d_screen_to_ground(h,sx,sy,gp)){p[0]=gp[0];p[1]=gp[1];p[2]=src->position[2];}
     (void)target;
-    return kavram3d_duplicate_selection_at_surface(h,sx,sy);
-}
-
-void kavram3d_delete_selected(void*h){
-    KVEngine*e=(KVEngine*)h;if(!e)return;
-    int write=0;
-    for(int read=0;read<e->object_count;++read){
-        if(e->objects[read].selected) continue;
-        if(write!=read) e->objects[write]=e->objects[read];
-        ++write;
+    int nid=kavram3d_create_object(h,src->mesh_id,src->name,p[0],p[1],p[2]);
+    if(!nid)return 0;
+    KVObject*no=kv_find(e,nid);
+    if(no){
+        memcpy(no->rotation,src->rotation,sizeof(no->rotation));
+        memcpy(no->scale,src->scale,sizeof(no->scale));
+        memcpy(no->color,src->color,sizeof(no->color));
+        no->motion_enabled=src->motion_enabled;
+        no->motion_speed=src->motion_speed;
+        no->motion_mode=src->motion_mode;
+        no->motion_axis=src->motion_axis;
+        no->duplicate=1;
     }
-    e->object_count=write;
+    kavram3d_select(h,nid);
+    return nid;
 }
 
 void kavram3d_delete_object(void*h,int id){
     KVEngine*e=(KVEngine*)h;if(!e||!id)return;
     int idx=kv_index(e,id);if(idx<0)return;
+    if(e->object_count<=1)return;
     for(int i=idx;i<e->object_count-1;++i)e->objects[i]=e->objects[i+1];
     e->object_count--;
-}
-
-void kavram3d_set_object_group(void*h,int id,int group_id){
-    KVEngine*e=(KVEngine*)h;if(!e)return; KVObject*o=kv_find(e,id); if(o)o->group_id=group_id;
-}
-int kavram3d_get_object_group(void*h,int id){
-    KVEngine*e=(KVEngine*)h;if(!e)return 0; KVObject*o=kv_find(e,id); return o?o->group_id:0;
 }
 
 void kavram3d_subdivide_selected(void*h){

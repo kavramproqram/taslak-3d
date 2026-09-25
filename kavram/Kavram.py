@@ -44,8 +44,8 @@ class AppController:
             "show_panel_2": "2",
             "show_panel_3": "3",
             "show_panel_4": "4",
-            "delete_selected": "Ctrl+Sol Tık + Sürükle",
-            "duplicate_selected": "Sol Tık + Sürükle",
+            "delete_selected": "Ctrl+Sol Tık",
+            "duplicate_selected": "Sol Tık",
             "add_object": "Num+",
             "subdivide": "Num/",
             "toggle_motion": "Num*",
@@ -127,7 +127,8 @@ class AppController:
     def delete_selected(self):
         if not self.view:
             return
-        self.engine.lib.kavram3d_delete_selected(self.engine.h)
+        for oid in list(self.engine.selected_ids())[::-1]:
+            self.engine.lib.kavram3d_delete_object(self.engine.h, oid)
         self.scene_changed()
 
     def subdivide(self):

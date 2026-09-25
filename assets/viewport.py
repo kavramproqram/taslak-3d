@@ -43,6 +43,8 @@ class GLView(QOpenGLWidget):
         self.draw_name = "Cube"
         self.draw_target = 0
         self.draw_last = None
+        self.draw_last_world = None
+        self.draw_spacing = 0.05
         self.drag_started = False
         self.selection_start = QPoint()
         self.selection_dragging = False
@@ -245,11 +247,49 @@ class GLView(QOpenGLWidget):
         ok=self.engine.lib.kavram3d_screen_to_ground(self.engine.h,float(p.x()),float(p.y()),out)
         return (float(out[0]),float(out[1]),float(out[2])) if ok else None
 
+    def _current_brush_spacing(self):
+        if self.engine.lib.kavram3d_selected_count(self.engine.h) > 0:
+            spacing=float(self.engine.lib.kavram3d_selected_brush_spacing(self.engine.h))
+        else:
+            spacing=float(self.engine.lib.kavram3d_mesh_brush_spacing(self.engine.h, int(self.draw_mesh_id)))
+        return max(0.05, spacing)
+
+    def _stamp_group_ground(self, x, y):
+        return int(self.engine.lib.kavram3d_duplicate_selection_at_ground(
+            self.engine.h, float(x), float(y)))
+
+    @staticmethod
+    def _ground_lerp(a, b, t):
+        return (a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, 0.0)
+
+    def _stamp_group_path(self, current_world):
+        if current_world is None:
+            return
+        if self.draw_last_world is None:
+            self.draw_last_world = current_world
+            self._stamp_group_ground(current_world[0], current_world[1])
+            return
+        last=self.draw_last_world
+        dx=current_world[0]-last[0]; dy=current_world[1]-last[1]
+        dist=math.hypot(dx,dy)
+        spacing=max(self.draw_spacing,0.05)
+        if dist < spacing:
+            return
+        steps=max(1,int(math.floor(dist/spacing)))
+        for i in range(1,steps+1):
+            t=(i*spacing)/dist
+            if t>1.0: t=1.0
+            point=self._ground_lerp(last,current_world,t)
+            self._stamp_group_ground(point[0],point[1])
+        self.draw_last_world=(last[0]+dx*(steps*spacing/dist), last[1]+dy*(steps*spacing/dist), 0.0)
+
     def mousePressEvent(self, event):
         self.setFocus(Qt.MouseFocusReason)
         self.last = event.pos()
         self.drag_started = False
         self.draw_last = None
+        self.draw_last_world = None
+        self.draw_spacing = self._current_brush_spacing()
         self.selection_start = event.pos()
         self.selection_current = event.pos()
         self.selection_dragging = False
@@ -301,15 +341,17 @@ class GLView(QOpenGLWidget):
         # Düz LMB = aktif kopya/çizim fırçası. Basış anında ilk damgayı üretir,
         # MOUSEMOVE olaylarında yeterli ekran mesafesi oluştuğunda yenisini ekler.
         self.drag_mode = "group-stamp" if self.engine.selected_ids() else "add-stamp"
+        point=self._ground_point(event.pos())
         if self.drag_mode == "group-stamp":
-            oid = self.engine.lib.kavram3d_duplicate_selection_at_surface(
-                self.engine.h, float(event.x()), float(event.y()))
+            if point is not None:
+                self.draw_last_world=point
+                self._stamp_group_ground(point[0],point[1])
         else:
             oid = self.engine.lib.kavram3d_add_object_at_surface(
                 self.engine.h, self.draw_mesh_id,
                 float(event.x()), float(event.y()), self.draw_name.encode(), 0)
-        if oid:
-            self.draw_last = event.pos()
+            if oid:
+                self.draw_last = event.pos()
         self.update()
 
     def mouseMoveEvent(self,event):
@@ -327,15 +369,15 @@ class GLView(QOpenGLWidget):
                 self.selection_dragging = True
             self.update(); return
 
-        if self.drag_mode in ("add-stamp","group-stamp"):
+        if self.drag_mode == "group-stamp":
+            self._stamp_group_path(self._ground_point(event.pos()))
+            self.update(); return
+
+        if self.drag_mode == "add-stamp":
             if self.draw_last is None or (event.pos()-self.draw_last).manhattanLength()>=18:
-                if self.drag_mode=="add-stamp":
-                    oid=self.engine.lib.kavram3d_add_object_at_surface(
-                        self.engine.h,self.draw_mesh_id,float(event.x()),float(event.y()),
-                        self.draw_name.encode(),0)
-                else:
-                    oid=self.engine.lib.kavram3d_duplicate_selection_at_surface(
-                        self.engine.h,float(event.x()),float(event.y()))
+                oid=self.engine.lib.kavram3d_add_object_at_surface(
+                    self.engine.h,self.draw_mesh_id,float(event.x()),float(event.y()),
+                    self.draw_name.encode(),0)
                 if oid: self.draw_last=event.pos()
             self.update(); return
 
@@ -372,6 +414,7 @@ class GLView(QOpenGLWidget):
             self.transform_mode=None
         self.drag_mode=None
         self.draw_last=None
+        self.draw_last_world=None
         self.draw_target=0
         self.selection_dragging=False
 

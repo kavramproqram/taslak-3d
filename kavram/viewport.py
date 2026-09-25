@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PyQt5.QtCore import QPoint, Qt, pyqtSignal
-from PyQt5.QtGui import QFont, QSurfaceFormat, QPainter, QPen, QColor
+from PyQt5.QtGui import QFont, QSurfaceFormat
 from PyQt5.QtWidgets import QOpenGLWidget, QVBoxLayout, QLabel, QWidget
 from OpenGL.GL import *
 from OpenGL.raw.GL.VERSION.GL_2_0 import glVertexAttribPointer as raw_glVertexAttribPointer
@@ -44,9 +44,6 @@ class GLView(QOpenGLWidget):
         self.draw_target = 0
         self.draw_last = None
         self.drag_started = False
-        self.selection_start = QPoint()
-        self.selection_dragging = False
-        self.selection_current = QPoint()
         self.initialized = False
         self.meshes: dict[int, GPUMesh] = {}
         self.mesh_bounds: dict[int, tuple[float, float, float]] = {}
@@ -199,26 +196,6 @@ class GLView(QOpenGLWidget):
                 glUniform3f(self._u["uColor"],*hi); glUniform1i(self._u["uSelected"],1); glDrawArrays(GL_TRIANGLES,0,mesh.count)
                 glPolygonMode(GL_FRONT_AND_BACK,GL_FILL)
         glBindVertexArray(0)
-        if self.drag_mode=="select" and self.selection_dragging:
-            p=QPainter(self)
-            p.setRenderHint(QPainter.Antialiasing, False)
-            p.setPen(QPen(QColor(235,235,235), 1, Qt.DashLine))
-            x0,y0=self.selection_start.x(),self.selection_start.y()
-            x1,y1=self.selection_current.x(),self.selection_current.y()
-            p.drawRect(min(x0,x1),min(y0,y1),abs(x1-x0),abs(y1-y0))
-            p.end()
-
-    def register_mesh_data(self, data: MeshData, preferred_id: int | None = None):
-        mesh_id = preferred_id if preferred_id is not None else self.next_imported_mesh_id
-        while mesh_id in self.meshes: mesh_id += 1
-        self.next_imported_mesh_id = max(self.next_imported_mesh_id, mesh_id + 1)
-        if not self.initialized:
-            raise RuntimeError("GL context hazır değil; mesh daha sonra yüklenebilir.")
-        self._upload_mesh(mesh_id, array.array("f", data.vertices))
-        self.mesh_bounds[mesh_id] = data.half_extents
-        hb=(ctypes.c_float*3)(*data.half_extents)
-        self.engine.lib.kavram3d_set_mesh_bounds(self.engine.h,mesh_id,hb)
-        return mesh_id, data.half_extents
 
     def register_imported_mesh(self, path: str, preferred_id: int | None = None):
         data: MeshData = load_gltf(path)
@@ -249,10 +226,6 @@ class GLView(QOpenGLWidget):
         self.setFocus(Qt.MouseFocusReason)
         self.last = event.pos()
         self.drag_started = False
-        self.draw_last = None
-        self.selection_start = event.pos()
-        self.selection_current = event.pos()
-        self.selection_dragging = False
         mods = event.modifiers()
 
         if event.button() == Qt.MiddleButton:
@@ -267,50 +240,55 @@ class GLView(QOpenGLWidget):
         if event.button() != Qt.LeftButton:
             return
 
-        # Shift + LMB: seçim modu. Tek tık toggling, sürükleme kutu seçimi.
-        if mods & Qt.ShiftModifier:
-            self.drag_mode = "select"
+        hit = self.engine.lib.kavram3d_pick(
+            self.engine.h, float(event.x()), float(event.y()))
+
+        if mods & Qt.ControlModifier:
+            # Ctrl + Sol tık = sil
+            if hit:
+                self.engine.lib.kavram3d_delete_object(self.engine.h, hit)
+                self.object_selected.emit()
+                self.scene_changed.emit()
+                self.update()
             return
 
-        # Ctrl + LMB: silme fırçası. Önceden seçilmiş nesneler varsa seçim
-        # grubunun tamamı ilk basışta silinir; devam eden sürükleme de imleç
-        # altındaki nesneleri kaldırır.
-        if mods & Qt.ControlModifier:
+        # Düz sol tık = kopya üret
+        if hit:
             selected = self.engine.selected_ids()
             if selected:
-                self.engine.lib.kavram3d_delete_selected(self.engine.h)
-                self.status.emit("Seçili grup silindi; Ctrl + sürükleme silmeye devam eder")
+                src_info = self.engine.info(selected[0])
+                src_state = self.engine.state(selected[0])
+                nid = self.engine.lib.kavram3d_add_object_at_surface(
+                    self.engine.h, src_info["mesh_id"],
+                    float(event.x()), float(event.y()),
+                    src_info["name"].encode(), hit)
+                if nid:
+                    self.engine.set_state(nid, src_state)
+                    rgba = (ctypes.c_float * 4)(
+                        src_info["color"][0], src_info["color"][1],
+                        src_info["color"][2], 1.0)
+                    self.engine.lib.kavram3d_set_object_color(self.engine.h, nid, rgba)
+                    self.engine.lib.kavram3d_set_object_motion(
+                        self.engine.h, nid,
+                        1 if src_info["motion_enabled"] else 0,
+                        src_info["motion_speed"],
+                        src_info["motion_mode"],
+                        src_info["motion_axis"])
+                    self.engine.lib.kavram3d_select(self.engine.h, nid)
             else:
-                hit = self.engine.lib.kavram3d_pick(
-                    self.engine.h, float(event.x()), float(event.y()))
-                if hit:
-                    self.engine.lib.kavram3d_delete_object(self.engine.h, hit)
-            self.drag_mode = "delete-stamp"
-            self.scene_changed.emit()
+                self.engine.lib.kavram3d_add_object_at_surface(
+                    self.engine.h, self.draw_mesh_id,
+                    float(event.x()), float(event.y()),
+                    self.draw_name.encode(), hit)
             self.object_selected.emit()
+            self.scene_changed.emit()
             self.update()
-            return
-
-        # G/R/S bir dönüşüm modu kurduysa, gerçek sol-sürükleme başlayınca uygula.
-        # Böylece klavye kısayolu tek başına nesneyi hareket ettirmez.
-        if self.transform_mode:
-            self.drag_mode = "transform"
-            self.status.emit({"G":"Taşıma","R":"Döndürme","S":"Ölçek"}[self.transform_mode])
-            return
-
-        # Düz LMB = aktif kopya/çizim fırçası. Basış anında ilk damgayı üretir,
-        # MOUSEMOVE olaylarında yeterli ekran mesafesi oluştuğunda yenisini ekler.
-        self.drag_mode = "group-stamp" if self.engine.selected_ids() else "add-stamp"
-        if self.drag_mode == "group-stamp":
-            oid = self.engine.lib.kavram3d_duplicate_selection_at_surface(
-                self.engine.h, float(event.x()), float(event.y()))
         else:
-            oid = self.engine.lib.kavram3d_add_object_at_surface(
-                self.engine.h, self.draw_mesh_id,
-                float(event.x()), float(event.y()), self.draw_name.encode(), 0)
-        if oid:
-            self.draw_last = event.pos()
-        self.update()
+            if not (mods & Qt.ShiftModifier):
+                self.engine.lib.kavram3d_select(self.engine.h, 0)
+            self.object_selected.emit()
+            self.scene_changed.emit()
+            self.update()
 
     def mouseMoveEvent(self,event):
         d=event.pos()-self.last; self.last=event.pos(); dx=float(d.x()); dy=float(d.y())
@@ -320,60 +298,23 @@ class GLView(QOpenGLWidget):
         if self.drag_mode=="transform" and self.transform_mode:
             fn={"G":"kavram3d_move_selected_drag","R":"kavram3d_rotate_selected_drag","S":"kavram3d_scale_selected_drag"}[self.transform_mode]
             getattr(self.engine.lib,fn)(self.engine.h,dx,dy); self.scene_changed.emit(); self.update(); return
-
-        if self.drag_mode=="select":
-            self.selection_current = event.pos()
-            if (event.pos()-self.selection_start).manhattanLength() >= 6:
-                self.selection_dragging = True
-            self.update(); return
-
-        if self.drag_mode in ("add-stamp","group-stamp"):
-            if self.draw_last is None or (event.pos()-self.draw_last).manhattanLength()>=18:
+        if self.drag_mode in ("add-stamp","duplicate-stamp"):
+            if self.draw_last is None or (event.pos()-self.draw_last).manhattanLength()>=28:
                 if self.drag_mode=="add-stamp":
-                    oid=self.engine.lib.kavram3d_add_object_at_surface(
-                        self.engine.h,self.draw_mesh_id,float(event.x()),float(event.y()),
-                        self.draw_name.encode(),0)
+                    oid=self.engine.lib.kavram3d_add_object_at_surface(self.engine.h,self.draw_mesh_id,float(event.x()),float(event.y()),self.draw_name.encode(),self.draw_target)
                 else:
-                    oid=self.engine.lib.kavram3d_duplicate_selection_at_surface(
-                        self.engine.h,float(event.x()),float(event.y()))
-                if oid: self.draw_last=event.pos()
+                    oid=self.engine.lib.kavram3d_duplicate_selected_at_surface(self.engine.h,float(event.x()),float(event.y()),self.draw_target)
+                if oid: self.draw_last=event.pos(); self.scene_changed.emit()
             self.update(); return
-
         if self.drag_mode=="delete-stamp":
             hit=self.engine.lib.kavram3d_pick(self.engine.h,float(event.x()),float(event.y()))
-            if hit:
-                self.engine.lib.kavram3d_delete_object(self.engine.h,hit)
-                self.update()
+            if hit: self.engine.lib.kavram3d_delete_object(self.engine.h,hit); self.scene_changed.emit()
+            self.update()
 
     def mouseReleaseEvent(self,event):
-        if event.button()==Qt.LeftButton:
-            if self.drag_mode=="select":
-                if self.selection_dragging:
-                    self.engine.lib.kavram3d_select_box(
-                        self.engine.h,
-                        float(self.selection_start.x()), float(self.selection_start.y()),
-                        float(event.x()), float(event.y()), 1)
-                else:
-                    hit=self.engine.lib.kavram3d_pick(
-                        self.engine.h,float(event.x()),float(event.y()))
-                    if hit:
-                        self.engine.lib.kavram3d_toggle_select(self.engine.h,hit)
-                self.object_selected.emit()
-                self.scene_changed.emit()
-            elif self.drag_mode in ("add-stamp","group-stamp"):
-                self.object_selected.emit()
-                self.scene_changed.emit()
-            elif self.drag_mode=="delete-stamp":
-                self.object_selected.emit()
-                self.scene_changed.emit()
-        elif event.button()==Qt.MiddleButton:
-            pass
-        if self.drag_mode=="transform":
-            self.transform_mode=None
-        self.drag_mode=None
-        self.draw_last=None
-        self.draw_target=0
-        self.selection_dragging=False
+        if event.button() in (Qt.LeftButton,Qt.MiddleButton):
+            if self.drag_mode=="transform": self.transform_mode=None
+            self.drag_mode=None; self.draw_last=None; self.draw_target=0
 
     def wheelEvent(self,event):
         self.engine.lib.kavram3d_zoom_view(self.engine.h,float(event.angleDelta().y())/120.0); self.update()
@@ -382,8 +323,8 @@ class GLView(QOpenGLWidget):
         if mode not in ("G","R","S") or self.engine.lib.kavram3d_selected_count(self.engine.h)<=0:
             self.transform_mode=None; self.drag_mode=None
             return
-        self.transform_mode=mode; self.drag_mode=None
-        self.status.emit(f"{ {'G':'Taşıma','R':'Döndürme','S':'Ölçek'}[mode] } hazır — sol sürükle")
+        self.transform_mode=mode; self.drag_mode="transform"
+        self.status.emit({"G":"Taşıma","R":"Döndürme","S":"Ölçek"}[mode])
 
     def cancel_transform(self): self.transform_mode=None; self.drag_mode=None
 

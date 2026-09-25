@@ -16,10 +16,6 @@ class MeshData:
     vertices: list[float]
     half_extents: tuple[float, float, float]
     primitive_count: int = 0
-    name: str = "Nesne"
-    color: tuple[float, float, float, float] = (0.55, 0.58, 0.62, 1.0)
-    group_name: str = "Imported"
-    origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 def _mat_mul(a: list[float], b: list[float]) -> list[float]:
@@ -162,107 +158,6 @@ def _read_accessor(doc: dict, buffers: list[bytes], accessor_index: int) -> list
         result.append(tuple(decode(v) for v in values))
     return result
 
-
-
-def _material_color(doc: dict, material_index: int | None):
-    try:
-        if material_index is None:
-            return (0.55, 0.58, 0.62, 1.0)
-        mat = doc.get("materials", [])[int(material_index)]
-        pbr = mat.get("pbrMetallicRoughness", {})
-        c = pbr.get("baseColorFactor", [0.55, 0.58, 0.62, 1.0])
-        if len(c) == 4:
-            return tuple(float(max(0.0, min(1.0, x))) for x in c)
-    except Exception:
-        pass
-    return (0.55, 0.58, 0.62, 1.0)
-
-
-def load_gltf_scene(path: str | Path) -> list[MeshData]:
-    """Load each renderable glTF node as a separate Kavram object.
-
-    This intentionally does not merge nodes into one mesh, so an imported
-    atom/assembly remains a collection of independent objects that can be
-    multi-selected and duplicated as a group.
-    """
-    path = Path(path).resolve()
-    doc, embedded, base_dir = _load_container(path)
-    buffers = _buffers(doc, embedded, base_dir)
-    nodes = doc.get("nodes", [])
-    meshes = doc.get("meshes", [])
-    scenes = doc.get("scenes", [])
-    scene_idx = int(doc.get("scene", 0)) if scenes else -1
-    roots = scenes[scene_idx].get("nodes", []) if scene_idx >= 0 else list(range(len(nodes)))
-    result: list[MeshData] = []
-
-    def visit(node_index: int, parent: list[float], group_name: str):
-        node = nodes[node_index]
-        world = _mat_mul(parent, _node_matrix(node))
-        mesh_index = node.get("mesh")
-        node_vertices: list[float] = []
-        all_min = [float("inf")] * 3
-        all_max = [float("-inf")] * 3
-        primitive_count = 0
-        colors=[]
-        if mesh_index is not None:
-            mesh = meshes[int(mesh_index)]
-            for primitive in mesh.get("primitives", []):
-                if int(primitive.get("mode", 4)) != 4:
-                    continue
-                attrs = primitive.get("attributes", {})
-                if "POSITION" not in attrs:
-                    continue
-                pos = _read_accessor(doc, buffers, int(attrs["POSITION"]))
-                nor = _read_accessor(doc, buffers, int(attrs["NORMAL"])) if "NORMAL" in attrs else None
-                indices = _read_accessor(doc, buffers, int(primitive["indices"])) if "indices" in primitive else [(float(i),) for i in range(len(pos))]
-                idx = [int(v[0]) for v in indices]
-                if len(idx) % 3:
-                    idx = idx[:len(idx) - len(idx) % 3]
-                if nor is None:
-                    accum = [[0.0, 0.0, 0.0] for _ in pos]
-                    for t in range(0, len(idx), 3):
-                        a,b,c=pos[idx[t]],pos[idx[t+1]],pos[idx[t+2]]
-                        ab=(b[0]-a[0],b[1]-a[1],b[2]-a[2]); ac=(c[0]-a[0],c[1]-a[1],c[2]-a[2])
-                        fn=(ab[1]*ac[2]-ab[2]*ac[1],ab[2]*ac[0]-ab[0]*ac[2],ab[0]*ac[1]-ab[1]*ac[0])
-                        for vi in (idx[t],idx[t+1],idx[t+2]):
-                            accum[vi][0]+=fn[0];accum[vi][1]+=fn[1];accum[vi][2]+=fn[2]
-                    nor=[]
-                    for n in accum:
-                        ln=math.sqrt(n[0]*n[0]+n[1]*n[1]+n[2]*n[2]) or 1.0
-                        nor.append((n[0]/ln,n[1]/ln,n[2]/ln))
-                for vi in idx:
-                    p3=_transform_point(world, tuple(map(float,pos[vi][:3])))
-                    n3=_transform_normal(world, tuple(map(float,nor[vi][:3])))
-                    node_vertices.extend((p3[0],p3[1],p3[2],n3[0],n3[1],n3[2]))
-                    for j in range(3):
-                        all_min[j]=min(all_min[j],p3[j]); all_max[j]=max(all_max[j],p3[j])
-                colors.append(_material_color(doc, primitive.get("material")))
-                primitive_count += 1
-        if node_vertices:
-            center=((all_min[0]+all_max[0])*0.5,
-                    (all_min[1]+all_max[1])*0.5,
-                    (all_min[2]+all_max[2])*0.5)
-            centered=[]
-            for i in range(0,len(node_vertices),6):
-                centered.extend((node_vertices[i]-center[0],node_vertices[i+1]-center[1],node_vertices[i+2]-center[2],
-                                 node_vertices[i+3],node_vertices[i+4],node_vertices[i+5]))
-            half=tuple(max(0.001,(all_max[i]-all_min[i])*0.5) for i in range(3))
-            if colors:
-                color=tuple(sum(c[k] for c in colors)/len(colors) for k in range(4))
-            else:
-                color=(0.55,0.58,0.62,1.0)
-            node_name=str(node.get("name") or f"{group_name}_{node_index}")
-            result.append(MeshData(centered, half, primitive_count, node_name, color, group_name, center))
-        for child in node.get("children", []):
-            visit(int(child), world, group_name)
-
-    ident=[1.0,0,0,0, 0,1.0,0,0, 0,0,1.0,0, 0,0,0,1.0]
-    group_name=path.stem
-    for root in roots:
-        visit(int(root),ident,group_name)
-    if not result:
-        raise ValueError("GLB/glTF içinde çizilebilir nesne bulunamadı.")
-    return result
 
 def load_gltf(path: str | Path) -> MeshData:
     path = Path(path).resolve()

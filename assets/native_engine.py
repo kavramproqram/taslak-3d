@@ -58,6 +58,11 @@ class NativeEngine:
         self.lib.kavram3d_add_object_at_surface.argtypes = [V, I, ctypes.c_float, ctypes.c_float, ctypes.c_char_p, I]
         self.lib.kavram3d_duplicate_selected_at_surface.argtypes = [V, ctypes.c_float, ctypes.c_float, I]
         self.lib.kavram3d_duplicate_selection_at_surface.argtypes = [V, ctypes.c_float, ctypes.c_float]
+        self.lib.kavram3d_duplicate_selection_at_ground.argtypes = [V, ctypes.c_float, ctypes.c_float]
+        self.lib.kavram3d_selected_brush_spacing.argtypes = [V]
+        self.lib.kavram3d_selected_brush_spacing.restype = ctypes.c_float
+        self.lib.kavram3d_mesh_brush_spacing.argtypes = [V, I]
+        self.lib.kavram3d_mesh_brush_spacing.restype = ctypes.c_float
         self.lib.kavram3d_delete_selected.argtypes = [V]
         self.lib.kavram3d_delete_object.argtypes = [V, I]
         self.lib.kavram3d_set_object_group.argtypes = [V, I, I]

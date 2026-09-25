@@ -4,9 +4,6 @@ import json
 import shutil
 import hashlib
 import ctypes
-import subprocess
-import tempfile
-import shutil
 from pathlib import Path
 
 
@@ -54,85 +51,20 @@ class SceneIO:
             shutil.copy2(source_buf, dest_buf)
         return target
 
-    def _blender_executable(self):
-        return shutil.which("blender") or shutil.which("blender-launcher")
-
-    def _convert_with_blender(self, src: Path) -> Path:
-        blender = self._blender_executable()
-        if not blender:
-            raise RuntimeError(".blend/FBX/OBJ gibi formatlar için sistemde Blender bulunamadı.")
-        out_dir = self.assets_dir / "converted"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha1(str(src).encode("utf-8")).hexdigest()[:10]
-        out = out_dir / f"{src.stem}-{digest}.glb"
-        script = (
-            "import bpy; "
-            "bpy.ops.wm.open_mainfile(filepath=" + repr(str(src)) + "); "
-            "bpy.ops.object.select_all(action='SELECT'); "
-            "bpy.ops.export_scene.gltf(filepath=" + repr(str(out)) + ", export_format='GLB', use_selection=True, export_apply=True)"
-        )
-        # Save a temporary conversion script so Blender does not inherit UI state.
-        with tempfile.NamedTemporaryFile("w", suffix=".py", encoding="utf-8", delete=False) as f:
-            f.write(script)
-            script_path = Path(f.name)
-        try:
-            proc = subprocess.run([blender, "-b", "--python", str(script_path)],
-                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                  text=True, check=False)
-            if proc.returncode != 0 or not out.exists():
-                tail = (proc.stdout or "").splitlines()[-12:]
-                raise RuntimeError("Blender dönüştürmesi başarısız: " + " | ".join(tail))
-        finally:
-            try: script_path.unlink()
-            except OSError: pass
-        return out
-
     def import_asset(self, source: str):
         src = Path(source).resolve()
         ext = src.suffix.lower()
-        allowed=(".glb", ".gltf", ".blend", ".fbx", ".obj", ".stl", ".ply", ".dae", ".3ds")
-        if ext not in allowed:
+        if ext not in (".glb", ".gltf", ".blend", ".fbx", ".obj",
+                       ".stl", ".ply", ".dae", ".3ds"):
             raise ValueError("Desteklenen 3D formatı: glb, gltf, blend, fbx, obj, stl, ply, dae, 3ds.")
-
-        import_path = src
-        if ext not in (".glb", ".gltf"):
-            import_path = self._convert_with_blender(src)
-        target = self._stage_asset(import_path)
-
-        from scene_import import load_gltf_scene
-        # Node verilerini tek bir mesh halinde birleştirmeden doğrudan GPU'ya yükle.
-        self.controller.view.makeCurrent()
-        try:
-            node_entries=[]
-            for meshdata in load_gltf_scene(str(target)):
-                mesh_id, _ = self.controller.view.register_mesh_data(meshdata)
-                node_entries.append((mesh_id, meshdata))
-        finally:
-            self.controller.view.doneCurrent()
-
-        group = src.stem
-        group_id = int(hashlib.sha1(str(src).encode("utf-8")).hexdigest()[:7], 16)
-        for mesh_id, meshdata in node_entries:
-            rid=self.controller.engine.lib.kavram3d_create_object(
-                self.controller.engine.h, int(mesh_id), meshdata.name.encode("utf-8"),
-                float(meshdata.origin[0]), float(meshdata.origin[1]), float(meshdata.origin[2]))
-            self.controller.engine.set_state(rid, ((float(meshdata.origin[0]),float(meshdata.origin[1]),float(meshdata.origin[2])), (0,0,0), (1,1,1)))
-            self.controller.engine.lib.kavram3d_set_object_group(self.controller.engine.h, rid, group_id)
-            self.controller.engine.lib.kavram3d_set_object_color(
-                self.controller.engine.h, rid, (ctypes.c_float*4)(*meshdata.color))
-            node_entries_item={"name":meshdata.name,"mesh_id":mesh_id,"builtin":False,
-                               "asset":self._rel(target),"group":group,"group_id":group_id}
-            self.controller.categories.add_asset("Imported", node_entries_item)
-            if first_mesh_id is None:
-                first_mesh_id=mesh_id
-                first_name=meshdata.name
-
+        target = self._stage_asset(src)
+        mesh_id, half = self.controller.view.register_imported_mesh(str(target))
+        item = {"name": src.stem, "mesh_id": mesh_id, "builtin": False, "asset": self._rel(target)}
+        self.controller.categories.add_asset("Imported", item)
         self.controller.object_panel.refresh_categories()
-        if first_mesh_id is not None:
-            self.controller.set_draw_tool(first_mesh_id, first_name)
-        self.controller.object_panel.refresh_objects()
-        self.controller.toast(f"Model eklendi: {src.name} ({len(node_entries)} ayrı nesne)")
-        return first_mesh_id, {"name":first_name,"mesh_id":first_mesh_id,"builtin":False,"asset":self._rel(target)}
+        self.controller.set_draw_tool(mesh_id, src.stem)
+        self.controller.toast(f"Model eklendi: {src.name}")
+        return mesh_id, item
 
     def export_scene(self, save_path: str, compression: str = "xz"):
         path = Path(save_path)
@@ -148,7 +80,7 @@ class SceneIO:
                     if int(item.get("mesh_id",-1))==info["mesh_id"] and not item.get("builtin"):
                         asset=item.get("asset"); break
                 if asset: break
-            objects.append({"id":oid,"name":info["name"],"mesh_id":info["mesh_id"],"position":pos,"rotation":rot,"scale":scale,"color":info["color"],"duplicate":info["duplicate"],"motion":{"enabled":info["motion_enabled"],"speed":info["motion_speed"],"mode":info["motion_mode"],"axis":info["motion_axis"]},"asset":asset,"group_id":info.get("group_id",0)})
+            objects.append({"id":oid,"name":info["name"],"mesh_id":info["mesh_id"],"position":pos,"rotation":rot,"scale":scale,"color":info["color"],"duplicate":info["duplicate"],"motion":{"enabled":info["motion_enabled"],"speed":info["motion_speed"],"mode":info["motion_mode"],"axis":info["motion_axis"]},"asset":asset})
         seen=set()
         for category in self.controller.categories.categories():
             for item in self.controller.categories.items(category):
@@ -177,9 +109,6 @@ class SceneIO:
 
         engine=self.controller.engine
         engine.lib.kavram3d_reset(engine.h)
-        from scene_import import load_gltf_scene
-        node_cache={}
-        node_cursor={}
         for asset in data.get("assets", []):
             rel=asset.get("asset")
             if not rel:
@@ -189,22 +118,8 @@ class SceneIO:
                 continue
             mesh_id=int(asset.get("mesh_id", 0))
             try:
-                key=str(asset_path)
-                if key not in node_cache:
-                    node_cache[key]=load_gltf_scene(key)
-                    node_cursor[key]=0
-                nodes=node_cache[key]
-                idx=node_cursor[key]
-                meshdata=nodes[idx] if idx < len(nodes) else None
-                node_cursor[key]=idx+1
-                if meshdata is None:
-                    continue
                 if mesh_id not in self.controller.view.meshes:
-                    self.controller.view.makeCurrent()
-                    try:
-                        self.controller.view.register_mesh_data(meshdata, preferred_id=mesh_id)
-                    finally:
-                        self.controller.view.doneCurrent()
+                    self.controller.view.register_imported_mesh(str(asset_path), preferred_id=mesh_id)
             except Exception:
                 continue
             self.controller.categories.add_asset("Imported", asset)
@@ -226,9 +141,6 @@ class SceneIO:
             c=obj.get("color")
             if c:
                 engine.lib.kavram3d_set_object_color(engine.h,rid,(ctypes.c_float*4)(float(c[0]),float(c[1]),float(c[2]),1.0))
-            group_id=int(obj.get("group_id",0))
-            if group_id:
-                engine.lib.kavram3d_set_object_group(engine.h,rid,group_id)
             m=obj.get("motion",{})
             engine.lib.kavram3d_set_object_motion(engine.h,rid,1 if m.get("enabled") else 0,float(m.get("speed",1)),int(m.get("mode",0)),int(m.get("axis",2)))
         if first_created and default_id and default_id != first_created:

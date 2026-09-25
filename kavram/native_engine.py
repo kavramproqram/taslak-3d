@@ -39,7 +39,6 @@ class NativeEngine:
         self.lib.kavram3d_selected_id_at.argtypes = [V, I]
         self.lib.kavram3d_select.argtypes = [V, I]
         self.lib.kavram3d_toggle_select.argtypes = [V, I]
-        self.lib.kavram3d_select_box.argtypes = [V, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, I]
         self.lib.kavram3d_pick.argtypes = [V, ctypes.c_float, ctypes.c_float]
         self.lib.kavram3d_screen_to_ground.argtypes = [V, ctypes.c_float, ctypes.c_float, P]
         for name in ("kavram3d_rotate_view", "kavram3d_pan_view"):
@@ -57,11 +56,7 @@ class NativeEngine:
         self.lib.kavram3d_create_object.argtypes = [V, I, ctypes.c_char_p, ctypes.c_float, ctypes.c_float, ctypes.c_float]
         self.lib.kavram3d_add_object_at_surface.argtypes = [V, I, ctypes.c_float, ctypes.c_float, ctypes.c_char_p, I]
         self.lib.kavram3d_duplicate_selected_at_surface.argtypes = [V, ctypes.c_float, ctypes.c_float, I]
-        self.lib.kavram3d_duplicate_selection_at_surface.argtypes = [V, ctypes.c_float, ctypes.c_float]
-        self.lib.kavram3d_delete_selected.argtypes = [V]
         self.lib.kavram3d_delete_object.argtypes = [V, I]
-        self.lib.kavram3d_set_object_group.argtypes = [V, I, I]
-        self.lib.kavram3d_get_object_group.argtypes = [V, I]
         self.lib.kavram3d_subdivide_selected.argtypes = [V]
         self.lib.kavram3d_set_mesh_bounds.argtypes = [V, I, P]
         self.lib.kavram3d_get_object_info.argtypes = [V, I, ctypes.POINTER(I), P, ctypes.POINTER(I), ctypes.POINTER(I), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(I), ctypes.POINTER(I), ctypes.c_char_p, ctypes.c_size_t]
@@ -107,7 +102,6 @@ class NativeEngine:
             "motion_enabled": bool(enabled.value), "motion_speed": float(speed.value),
             "motion_mode": int(mode.value), "motion_axis": int(axis.value),
             "name": name.value.decode("utf-8", "replace"),
-            "group_id": int(self.lib.kavram3d_get_object_group(self.h, oid)),
         }
 
     def render_items(self):

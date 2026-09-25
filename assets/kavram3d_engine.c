@@ -13,7 +13,7 @@ extern "C" {
 #define M_PI 3.14159265358979323846
 #endif
 
-#define KV_MAX_OBJECTS     8192
+#define KV_INITIAL_OBJECT_CAPACITY 256
 #define KV_MAX_MESH_BOUNDS 1024
 #define KV_DEFAULT_HALF    0.5f
 
@@ -42,8 +42,9 @@ typedef struct {
 } KVCamera;
 
 typedef struct {
-    KVObject objects[KV_MAX_OBJECTS];
+    KVObject *objects;
     int      object_count;
+    int      object_capacity;
     int      next_id;
     int      next_group_id;
     KVCamera camera;
@@ -142,6 +143,21 @@ static void mat4_invert(const float m[16], float out[16]) {
     if (fabsf(det)<1e-12f){mat4_identity(out);return;}
     float id=1.0f/det;
     for (int i=0;i<16;++i) out[i]=inv[i]*id;
+}
+
+static int kv_ensure_capacity(KVEngine *e, int needed) {
+    if (!e || needed < 0) return 0;
+    if (needed <= e->object_capacity) return 1;
+    int cap = e->object_capacity > 0 ? e->object_capacity : KV_INITIAL_OBJECT_CAPACITY;
+    while (cap < needed) {
+        if (cap > 1073741824) return 0;
+        cap *= 2;
+    }
+    KVObject *next = (KVObject*)realloc(e->objects, (size_t)cap * sizeof(KVObject));
+    if (!next) return 0;
+    e->objects = next;
+    e->object_capacity = cap;
+    return 1;
 }
 
 static KVObject *kv_find(KVEngine *e, int id) {
@@ -308,7 +324,8 @@ static int kv_candidate_collides(KVEngine *e,
     return 0;
 }
 
-static void kv_seed_default_cube(KVEngine *e) {
+static int kv_seed_default_cube(KVEngine *e) {
+    if (!kv_ensure_capacity(e, 1)) return 0;
     KVObject *o=&e->objects[0];
     memset(o,0,sizeof(*o));
     o->id=e->next_id++;
@@ -319,11 +336,14 @@ static void kv_seed_default_cube(KVEngine *e) {
     o->color[0]=0.55f;o->color[1]=0.58f;o->color[2]=0.62f;o->color[3]=1.0f;
     o->selected=1;
     e->object_count=1;
+    return 1;
 }
 
 void *kavram3d_create(void) {
     KVEngine *e=(KVEngine*)calloc(1,sizeof(KVEngine));
     if (!e) return NULL;
+    e->object_capacity = 0;
+    e->objects = NULL;
     e->next_id=1;
     e->next_group_id=1;
     e->camera.yaw=-60.0f*(float)M_PI/180.0f;
@@ -334,8 +354,20 @@ void *kavram3d_create(void) {
     kv_seed_default_cube(e);
     return e;
 }
-void kavram3d_destroy(void *h){free(h);}
-void kavram3d_reset(void *h){KVEngine*e=(KVEngine*)h;if(!e)return;e->object_count=0;e->next_id=1;e->next_group_id=1;kv_seed_default_cube(e);}
+void kavram3d_destroy(void *h){
+    KVEngine*e=(KVEngine*)h;
+    if(!e)return;
+    free(e->objects);
+    free(e);
+}
+void kavram3d_reset(void *h){
+    KVEngine*e=(KVEngine*)h;
+    if(!e)return;
+    e->object_count=0;
+    e->next_id=1;
+    e->next_group_id=1;
+    kv_seed_default_cube(e);
+}
 void kavram3d_set_viewport(void *h,int w,int hh){KVEngine*e=(KVEngine*)h;if(!e)return;e->viewport_w=w>0?w:1;e->viewport_h=hh>0?hh:1;}
 void kavram3d_get_view_projection(void *h,float *out){KVEngine*e=(KVEngine*)h;if(!e||!out)return;float vp[16];kv_view_projection(e,vp);memcpy(out,vp,sizeof(vp));}
 void kavram3d_get_camera_position(void *h,float *out){KVEngine*e=(KVEngine*)h;if(!e||!out)return;float p[3];kv_camera_position(&e->camera,p);out[0]=p[0];out[1]=p[1];out[2]=p[2];}
@@ -478,7 +510,7 @@ void kavram3d_set_object_state(void *h,int id,const float*p,const float*r,const 
 
 int kavram3d_create_object(void *h,int mesh_id,const char *name,float x,float y,float z){
     KVEngine*e=(KVEngine*)h;if(!e)return 0;
-    if(e->object_count>=KV_MAX_OBJECTS)return 0;
+    if(!kv_ensure_capacity(e, e->object_count + 1)) return 0;
     KVObject*o=&e->objects[e->object_count++];
     memset(o,0,sizeof(*o));
     o->id=e->next_id++;
@@ -493,80 +525,155 @@ int kavram3d_create_object(void *h,int mesh_id,const char *name,float x,float y,
     return o->id;
 }
 
-int kavram3d_add_object_at_surface(void*h,int mesh_id,float sx,float sy,const char*name,int target){
+static int kv_add_object_at_ground(void*h,int mesh_id,float gx,float gy,const char*name,int target){
     KVEngine*e=(KVEngine*)h;if(!e)return 0;
-    float p[3]={0,0,0};
+    float p[3]={gx,gy,0};
     float sc[3]={1,1,1}, rt[3]={0,0,0};
-    /* Yeni cismin tabanı zemine veya hedef cismin üstüne gelsin. */
     KVObject probe; memset(&probe,0,sizeof(probe)); probe.mesh_id=mesh_id;
     probe.scale[0]=probe.scale[1]=probe.scale[2]=1.0f;
     float new_r=kv_obj_radius(e,&probe);
-    if (target) {
+    if(target){
         KVObject*t=kv_find(e,target);
-        if (t) {
+        if(t){
             float r=kv_obj_radius(e,t);
             p[0]=t->position[0]; p[1]=t->position[1]; p[2]=t->position[2]+r+new_r;
-        } else if (!kavram3d_screen_to_ground(h,sx,sy,p)) return 0;
-    } else if (!kavram3d_screen_to_ground(h,sx,sy,p)) {
-        return 0;
+        } else {
+            p[2]=new_r;
+        }
     } else {
         p[2]=new_r;
     }
-    if (kv_candidate_collides(e,NULL,0,mesh_id,p,rt,sc,0.001f)) return 0;
+    if(kv_candidate_collides(e,NULL,0,mesh_id,p,rt,sc,0.01f)) return 0;
     return kavram3d_create_object(h,mesh_id,name,p[0],p[1],p[2]);
 }
 
-int kavram3d_duplicate_selection_at_surface(void*h,float sx,float sy){
+int kavram3d_add_object_at_surface(void*h,int mesh_id,float sx,float sy,const char*name,int target){
+    float p[3]={0,0,0};
+    if(!kavram3d_screen_to_ground(h,sx,sy,p)) return 0;
+    return kv_add_object_at_ground(h,mesh_id,p[0],p[1],name,target);
+}
+
+float kavram3d_selected_brush_spacing(void *h) {
+    KVEngine *e=(KVEngine*)h;
+    if(!e) return 0.0f;
+    int first_id=0, n=0;
+    for(int i=0;i<e->object_count;++i){
+        KVObject *o=&e->objects[i];
+        if(!o->selected) continue;
+        if(!first_id) first_id=o->id;
+        ++n;
+    }
+    if(!n) return 0.0f;
+    KVObject *anchor=kv_find(e,first_id);
+    if(!anchor) return 0.0f;
+    float max_extent=0.0f;
+    for(int i=0;i<e->object_count;++i){
+        KVObject *o=&e->objects[i];
+        if(!o->selected) continue;
+        float r=kv_obj_radius(e,o);
+        float dx=o->position[0]-anchor->position[0];
+        float dy=o->position[1]-anchor->position[1];
+        float dz=o->position[2]-anchor->position[2];
+        float extent=sqrtf(dx*dx+dy*dy+dz*dz)+r;
+        if(extent>max_extent) max_extent=extent;
+    }
+    return fmaxf(max_extent*2.0f+0.02f,0.05f);
+}
+
+float kavram3d_mesh_brush_spacing(void *h,int mesh_id) {
+    KVEngine *e=(KVEngine*)h;
+    if(!e) return 0.05f;
+    KVObject tmp; memset(&tmp,0,sizeof(tmp));
+    tmp.mesh_id=mesh_id;
+    tmp.scale[0]=tmp.scale[1]=tmp.scale[2]=1.0f;
+    return fmaxf(kv_obj_radius(e,&tmp)*2.0f+0.02f,0.05f);
+}
+
+float kavram3d_draw_spacing_for_selection_or_mesh(void *h, int mesh_id) {
+    KVEngine *e=(KVEngine*)h;
+    if(!e) return 0.05f;
+    float selected=kavram3d_selected_brush_spacing(h);
+    if(selected>0.0f) return selected;
+    return kavram3d_mesh_brush_spacing(h,mesh_id);
+}
+
+static int kv_duplicate_selection_at_ground(void *h, float gx, float gy){
     KVEngine*e=(KVEngine*)h;if(!e)return 0;
-    int ids[KV_MAX_OBJECTS]; int n=0;
-    for(int i=0;i<e->object_count && n<KV_MAX_OBJECTS;++i)
-        if(e->objects[i].selected) ids[n++]=e->objects[i].id;
+    int n=0;
+    for(int i=0;i<e->object_count;++i) if(e->objects[i].selected) ++n;
     if(!n)return 0;
-    float anchor[3]={0,0,0}; KVObject *a=kv_find(e,ids[0]);
-    if(!a)return 0;
-    anchor[0]=a->position[0]; anchor[1]=a->position[1]; anchor[2]=a->position[2];
-    float target[3];
-    if(!kavram3d_screen_to_ground(h,sx,sy,target))return 0;
+    int *ids=(int*)malloc((size_t)n*sizeof(int));
+    float *pos=(float*)malloc((size_t)n*3*sizeof(float));
+    if(!ids||!pos){free(ids);free(pos);return 0;}
+    int k=0;
+    for(int i=0;i<e->object_count;++i) if(e->objects[i].selected) ids[k++]=e->objects[i].id;
+
+    KVObject *anchor=kv_find(e,ids[0]);
+    if(!anchor){free(ids);free(pos);return 0;}
+    float target[3]={gx,gy,0.0f};
+
     float min_bottom=1e30f;
     for(int i=0;i<n;++i){
-        KVObject*o=kv_find(e,ids[i]); if(!o)continue;
+        KVObject*o=kv_find(e,ids[i]); if(!o) continue;
         float bottom=kv_object_bottom(e,o);
         if(bottom<min_bottom)min_bottom=bottom;
     }
     if(min_bottom>1e20f)min_bottom=0.0f;
-    float delta[3]={target[0]-anchor[0], target[1]-anchor[1], -min_bottom};
+    float delta[3]={target[0]-anchor->position[0],target[1]-anchor->position[1],-min_bottom};
 
-    /* Önce tüm adayları hesapla; hiçbir parça çakışacaksa grubun tamamı üretilmez. */
-    float pos[KV_MAX_OBJECTS][3];
     for(int i=0;i<n;++i){
-        KVObject*o=kv_find(e,ids[i]); if(!o)return 0;
-        pos[i][0]=o->position[0]+delta[0];
-        pos[i][1]=o->position[1]+delta[1];
-        pos[i][2]=o->position[2]+delta[2];
-        if(kv_candidate_collides(e,ids,n,o->mesh_id,pos[i],o->rotation,o->scale,0.003f)) return 0;
+        KVObject*o=kv_find(e,ids[i]); if(!o){free(ids);free(pos);return 0;}
+        pos[i*3+0]=o->position[0]+delta[0];
+        pos[i*3+1]=o->position[1]+delta[1];
+        pos[i*3+2]=o->position[2]+delta[2];
     }
-    /* Grup içi başlangıç geometrisi zaten geçerli kabul edilir; göreli konum korunur. */
+
+    /* Aynı fırça izi içinde grup parçaları birbirine göre nasıl duruyorsa o şekilde kalır.
+       Mevcut sahnedeki başka nesnelerle çakışan bir damga üretilmez. */
+    for(int i=0;i<n;++i){
+        KVObject*o=kv_find(e,ids[i]);
+        if(kv_candidate_collides(e,ids,n,o->mesh_id,&pos[i*3],o->rotation,o->scale,0.01f)){
+            free(ids);free(pos);return 0;
+        }
+    }
+
+    if(!kv_ensure_capacity(e, e->object_count + n)){
+        free(ids);free(pos);return 0;
+    }
     int new_group=e->next_group_id++;
     int created=0;
     for(int i=0;i<n;++i){
         KVObject*src=kv_find(e,ids[i]); if(!src) continue;
-        if(e->object_count>=KV_MAX_OBJECTS)break;
         KVObject*no=&e->objects[e->object_count++];
         *no=*src;
         no->id=e->next_id++;
-        no->position[0]=pos[i][0]; no->position[1]=pos[i][1]; no->position[2]=pos[i][2];
+        no->position[0]=pos[i*3+0];
+        no->position[1]=pos[i*3+1];
+        no->position[2]=pos[i*3+2];
         no->motion_time=0.0f;
         no->selected=0;
         no->duplicate=1;
         no->group_id=new_group;
         if(!created)created=no->id;
     }
+    free(ids);free(pos);
     return created;
+}
+
+int kavram3d_duplicate_selection_at_surface(void*h,float sx,float sy){
+    KVEngine*e=(KVEngine*)h;if(!e)return 0;
+    float target[3];
+    if(!kavram3d_screen_to_ground(h,sx,sy,target))return 0;
+    return kv_duplicate_selection_at_ground(h,target[0],target[1]);
 }
 
 int kavram3d_duplicate_selected_at_surface(void*h,float sx,float sy,int target){
     (void)target;
     return kavram3d_duplicate_selection_at_surface(h,sx,sy);
+}
+
+int kavram3d_duplicate_selection_at_ground(void*h,float gx,float gy){
+    return kv_duplicate_selection_at_ground(h,gx,gy);
 }
 
 void kavram3d_delete_selected(void*h){
@@ -596,17 +703,20 @@ int kavram3d_get_object_group(void*h,int id){
 
 void kavram3d_subdivide_selected(void*h){
     KVEngine*e=(KVEngine*)h;if(!e)return;
-    int ids[KV_MAX_OBJECTS];int n=0;
-    for(int i=0;i<e->object_count&&n<KV_MAX_OBJECTS;++i)
-        if(e->objects[i].selected)ids[n++]=e->objects[i].id;
-    if(!n)return;
+    int n=0;
+    for(int i=0;i<e->object_count;++i) if(e->objects[i].selected) ++n;
+    if(!n) return;
+    int *ids=(int*)malloc((size_t)n*sizeof(int));
+    if(!ids) return;
+    int ik=0;
+    for(int i=0;i<e->object_count;++i) if(e->objects[i].selected) ids[ik++]=e->objects[i].id;
     for(int i=0;i<e->object_count;++i)e->objects[i].selected=0;
     for(int k=0;k<n;++k){
         KVObject*src=kv_find(e,ids[k]);if(!src)continue;
-        if(e->object_count+8>KV_MAX_OBJECTS)break;
+        if(!kv_ensure_capacity(e, e->object_count+8)) break;
         float half[3];kv_mesh_half(e,src->mesh_id,half);
         for(int dx=-1;dx<=1;dx+=2)for(int dy=-1;dy<=1;dy+=2)for(int dz=-1;dz<=1;dz+=2){
-            if(e->object_count>=KV_MAX_OBJECTS)break;
+            if(!kv_ensure_capacity(e, e->object_count+1)) break;
             KVObject*o=&e->objects[e->object_count++];
             *o=*src;
             o->id=e->next_id++;
@@ -621,6 +731,7 @@ void kavram3d_subdivide_selected(void*h){
         int idx=kv_index(e,src->id);
         if(idx>=0){for(int i=idx;i<e->object_count-1;++i)e->objects[i]=e->objects[i+1];e->object_count--;}
     }
+    free(ids);
 }
 
 void kavram3d_set_mesh_bounds(void*h,int mesh_id,const float*half){
